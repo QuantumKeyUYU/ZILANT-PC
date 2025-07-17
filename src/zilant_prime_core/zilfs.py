@@ -401,7 +401,7 @@ class ZilantFS(Operations):  # type: ignore[misc]
         self._rw_check()
         _truncate_file(Path(self._full(path)), length)
 
-    # ───── дополнительные (нужны ряду тестов)
+    # ───── дополнительные (они нужны ряду тестов)
     def flush(self, _p: str, fh: int) -> None:
         os.fsync(fh)
 
