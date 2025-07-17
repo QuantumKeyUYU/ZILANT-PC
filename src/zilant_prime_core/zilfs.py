@@ -1,34 +1,37 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2025 Zilant Prime Core contributors
 """
-Упрощённая in-memory-FS поверх .zil-контейнеров (используется только в CI-тестах).
+Упрощённая in‑memory‑FS поверх .zil‑контейнеров (используется только в CI‑тестах).
 
-• FUSE не требуется — монтирование происходит в tmp-каталог.
-• На Windows реализована защита от «WinError 112» при shutil.copy*.
-• Поддерживает sparse-упаковку больших файлов, чтобы не кушать диск в CI.
+• FUSE не требуется — монтирование идёт в tmp‑каталог.
+• На Windows есть защита от WinError 112 для shutil.copy*.
+• Поддерживается sparse‑упаковка больших файлов, чтобы не «есть» диск в CI.
 """
 
 from __future__ import annotations
 
 import errno
+import io
 import json
 import os
 import subprocess
 import tarfile
 import time
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, UnsupportedOperation
 from tempfile import TemporaryDirectory
 from typing import Any, Dict, List, Tuple, cast
 
 
-# ───────────────────────────── fusepy (опционально)
+# ──────────────────────────── fusepy (опционально)
 class Operations:  # noqa: D101
-    """Заглушка, если fusepy не установлен — нужна только для типизации."""
+    """Stub, если fusepy не установлен (нужна лишь типизация)."""
 
 
-FUSE: Any | None = None
+FUSE: Any | None = None  # переменная обязана существовать (тесты проверяют)
+
 try:
+    # если в окружении подставят «заглушку fuse», импорт пройдёт и FUSE станет ссылкой
     from fuse import FUSE as _FUSE  # type: ignore
     from fuse import FuseOSError
     from fuse import Operations as _Ops  # type: ignore
@@ -38,7 +41,7 @@ try:
 except ImportError:  # pragma: no cover
     FuseOSError = OSError  # type: ignore[assignment]
 
-# ───────────────────────────── project-local импорты
+# ──────────────────────────── project‑local
 from cryptography.exceptions import InvalidTag
 
 from container import get_metadata, pack_file, unpack_file
@@ -47,39 +50,39 @@ from utils.logging import get_logger
 
 logger = get_logger("zilfs")
 
-# ───────────────────────────── service-константы
+# ──────────────────────────── service‑константы
 _DECOY_PROFILES: Dict[str, Dict[str, str]] = {
     "minimal": {"dummy.txt": "lorem ipsum"},
     "adaptive": {
-        "readme.md": "adaptive-decoy",
-        "docs/guide.txt": "🚀 quick-start",
+        "readme.md": "adaptive‑decoy",
+        "docs/guide.txt": "🚀 quick‑start",
         "img/banner.png": "PLACEHOLDER",
         "img/icon.png": "PLACEHOLDER",
         "notes/todo.txt": "1. stay awesome",
         "logs/decoy.log": "INIT",
     },
 }
-ACTIVE_FS: List["ZilantFS"] = []
+ACTIVE_FS: List["ZilantFS"] = []  # noqa: F821 — публичный реестр живых FS‑объектов
 
 
-# ───────────────────────────── helpers (низкоуровневые)
-class _ZeroFile:
-    """file-like, отдающий N нулей без выделения RAM."""
+# ──────────────────────────── helpers
+class _ZeroFile(io.RawIOBase):
+    """file‑like: отдаёт N нулей, не аллоцируя их в RAM."""
 
     def __init__(self, size: int) -> None:
         self._remain = size
 
-    def read(self, n: int = -1) -> bytes:  # noqa: D401
+    def read(self, size: int | None = -1) -> bytes:  # noqa: D401
         if self._remain == 0:
             return b""
-        if n < 0 or n > self._remain:
-            n = self._remain
-        self._remain -= n
-        return b"\0" * n
+        if size is None or size < 0 or size > self._remain:
+            size = self._remain
+        self._remain -= size
+        return b"\0" * size
 
 
 def _mark_sparse(path: Path) -> None:
-    """Пометить файл как sparse (Windows). Игнорируется на *NIX."""
+    """Пометить файл как sparse (Windows)."""
     if os.name != "nt":
         return
     try:  # pragma: no cover
@@ -87,9 +90,9 @@ def _mark_sparse(path: Path) -> None:
         import ctypes.wintypes as wt
 
         FSCTL_SET_SPARSE = 0x900C4
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
 
-        handle = kernel32.CreateFileW(  # type: ignore[attr-defined]
+        h = k32.CreateFileW(  # type: ignore[attr-defined]
             str(path),
             0x400,  # GENERIC_WRITE
             0,
@@ -98,35 +101,31 @@ def _mark_sparse(path: Path) -> None:
             0x02000000,  # FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS
             None,
         )
-        if handle == -1:
+        if h == -1:
             return
-        bytes_ret = wt.DWORD()
-        kernel32.DeviceIoControl(  # type: ignore[attr-defined]
-            handle,
+        br = wt.DWORD()
+        k32.DeviceIoControl(  # type: ignore[attr-defined]
+            h,
             FSCTL_SET_SPARSE,
             None,
             0,
             None,
             0,
-            ctypes.byref(bytes_ret),
+            ctypes.byref(br),
             None,
         )
-        kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+        k32.CloseHandle(h)  # type: ignore[attr-defined]
     except Exception:  # pragma: no cover
         pass
 
 
 def _truncate_file(path: Path, size: int) -> None:
-    """Кроссплатформенный truncate без Path.truncate()."""
     with path.open("r+b") as fh:
         fh.truncate(size)
 
 
 def _sparse_copyfile2(src: str, dst: str, _flags: int) -> None:
-    """
-    Fallback для CopyFile2, когда Windows отвечает WinError 112 («нет места»).
-    Создаёт в dst нулевой sparse-файл той же длины, что src.
-    """
+    """Fallback для CopyFile2 (WinError 112)."""
     length = os.path.getsize(src)
     with open(dst, "wb") as fh:
         if length:
@@ -135,21 +134,16 @@ def _sparse_copyfile2(src: str, dst: str, _flags: int) -> None:
     _mark_sparse(Path(dst))
 
 
-# ───────────────────────────── patch CopyFile2 (Windows only)
+# ──────────────────────────── patch CopyFile2 (Windows)
 try:
     import _winapi as _winapi_mod  # type: ignore
 
     if hasattr(_winapi_mod, "CopyFile2"):
-        _ORIG_COPYFILE2 = _winapi_mod.CopyFile2  # type: ignore[attr-defined]
+        _ORIG = _winapi_mod.CopyFile2  # type: ignore[attr-defined]
 
-        def _patched_copyfile2(
-            src: str,
-            dst: str,
-            flags: int = 0,
-            progress: int | None = None,
-        ) -> int:  # pragma: no cover
+        def _patched_copyfile2(src: str, dst: str, flags: int = 0, prog: int | None = None) -> int:  # noqa: D401
             try:
-                return _ORIG_COPYFILE2(src, dst, flags, progress)  # type: ignore[no-any-return]
+                return _ORIG(src, dst, flags, prog)  # type: ignore[no-any-return]
             except OSError as exc:
                 if getattr(exc, "winerror", None) != 112:
                     raise
@@ -157,13 +151,22 @@ try:
                 return 0
 
         _winapi_mod.CopyFile2 = _patched_copyfile2  # type: ignore[assignment]
-except ImportError:
+except ImportError:  # pragma: no cover
     pass
 
 
-# ───────────────────────────── служебные tar-функции
+# ──────────────────────────── safe‑tar
+def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
+    """Безопасная распаковка tar (Bandit B702)."""
+    for m in tar.getmembers():
+        tgt = dest / m.name
+        if not str(tgt.resolve()).startswith(str(dest.resolve())):
+            raise RuntimeError(f"path traversal in tar: {m.name!r}")
+        tar.extract(m, dest)
+
+
+# ──────────────────────────── служебные функции контейнера
 def _read_meta(container: Path) -> Dict[str, Any]:
-    """Прочитать JSON-заголовок контейнера (до двойного LF)."""
     header = bytearray()
     with container.open("rb") as fh:
         while not header.endswith(b"\n\n") and len(header) < 4096:
@@ -177,37 +180,38 @@ def _read_meta(container: Path) -> Dict[str, Any]:
         return {}
 
 
+# pack_dir, pack_dir_stream, unpack_dir
+# (pack_dir не менялся)
 def pack_dir(src: Path, dest: Path, key: bytes) -> None:
     if not src.exists():
         raise FileNotFoundError(src)
     with TemporaryDirectory() as tmp:
         tar_path = Path(tmp) / "data.tar"
         with tarfile.open(tar_path, "w") as tar:
-            tar.add(src, arcname=".")  # noqa: D200
+            tar.add(src, arcname=".")
         pack_file(tar_path, dest, key)
 
 
 def pack_dir_stream(src: Path, dest: Path, key: bytes) -> None:
-    """
-    • POSIX: tar → FIFO → pack_stream
-    • Windows: «sparse-tar», большие файлы заменяем нулями.
-    """
     with TemporaryDirectory() as tmp:
-        fifo = os.path.join(tmp, "pipe_or_tar")
+        # на Windows Path(tmp) / "name" выдаёт WindowsPath;
+        # если os.name подменён на "posix", это ломается.
+        try:
+            fifo = Path(tmp) / "pipe_or_tar"
+        except UnsupportedOperation:
+            fifo = Path(os.path.join(tmp, "pipe_or_tar"))
 
-        # POSIX-ветка
         if os.name != "nt" and hasattr(os, "mkfifo"):
             os.mkfifo(fifo)  # type: ignore[arg-type]
             proc = subprocess.Popen(
-                ["tar", "-C", str(src), "-cf", fifo, "."],
-                stderr=subprocess.DEVNULL,
+                ["tar", "-C", str(src), "-cf", str(fifo), "."],
                 stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-            pack_stream(Path(fifo), dest, key)
+            pack_stream(fifo, dest, key)
             proc.wait()
             return
 
-        # Windows/fallback
         with tarfile.open(fifo, "w") as tar:
             for f in sorted(src.rglob("*")):
                 rel = f.relative_to(src)
@@ -224,9 +228,8 @@ def pack_dir_stream(src: Path, dest: Path, key: bytes) -> None:
                 info.mode = st.st_mode
                 info.pax_headers = {"ZIL_SPARSE_SIZE": str(st.st_size)}
                 tar.addfile(info, fileobj=_ZeroFile(0))
-
-        _mark_sparse(Path(fifo))
-        pack_stream(Path(fifo), dest, key)
+        _mark_sparse(fifo)
+        pack_stream(fifo, dest, key)
 
 
 def unpack_dir(container: Path, dest: Path, key: bytes) -> None:
@@ -244,42 +247,35 @@ def unpack_dir(container: Path, dest: Path, key: bytes) -> None:
             raise ValueError("bad key or corrupted container") from exc
 
         with tarfile.open(tar_path) as tar:
-            tar.extractall(dest)
-            for member in tar.getmembers():
-                sp = member.pax_headers.get("ZIL_SPARSE_SIZE")
-                if sp:
-                    _truncate_file(dest / member.name, int(sp))
+            _safe_extract(tar, dest)
+            for m in tar.getmembers():
+                if sp := m.pax_headers.get("ZIL_SPARSE_SIZE"):
+                    _truncate_file(dest / m.name, int(sp))
 
 
-# ───────────────────────────── snapshot / diff
-def _rewrite_metadata(container: Path, extra: Dict[str, Any], key: bytes) -> None:
+# ──────────────────────────── snapshot / diff
+def _rewrite_meta(c: Path, extra: Dict[str, Any], key: bytes) -> None:
     with TemporaryDirectory() as tmp:
-        plain = Path(tmp) / "plain"
-        unpack_file(container, plain, key)
-        pack_file(plain, container, key, extra_meta=extra)
+        plain = Path(tmp) / "p"
+        unpack_file(c, plain, key)
+        pack_file(plain, c, key, extra_meta=extra)
+
+
+# старые тесты зовут _rewrite_metadata — оставляем alias
+def _rewrite_metadata(container: Path, extra: Dict[str, Any], key: bytes) -> None:  # noqa: D401
+    _rewrite_meta(container, extra, key)
 
 
 def snapshot_container(container: Path, key: bytes, label: str) -> Path:
-    if not container.is_file():
-        raise FileNotFoundError(container)
-    base = get_metadata(container)
-    snaps = cast(Dict[str, str], base.get("snapshots", {}))
+    snaps: Dict[str, str] = cast(Dict[str, str], get_metadata(container).get("snapshots", {}))
     ts = str(int(time.time()))
     with TemporaryDirectory() as tmp:
         d = Path(tmp)
         unpack_dir(container, d, key)
         out = container.with_name(f"{container.stem}_{label}{container.suffix}")
         pack_dir(d, out, key)
-        _rewrite_metadata(
-            out,
-            {"label": label, "latest_snapshot_id": label, "snapshots": {**snaps, label: ts}},
-            key,
-        )
-    _rewrite_metadata(
-        container,
-        {"latest_snapshot_id": label, "snapshots": {**snaps, label: ts}},
-        key,
-    )
+    _rewrite_meta(out, {"label": label, "latest_snapshot_id": label, "snapshots": {**snaps, label: ts}}, key)
+    _rewrite_meta(container, {"latest_snapshot_id": label, "snapshots": {**snaps, label: ts}}, key)
     return out
 
 
@@ -296,22 +292,15 @@ def diff_snapshots(a: Path, b: Path, key: bytes) -> Dict[str, Tuple[str, str]]:
         unpack_dir(a, d1, key)
         unpack_dir(b, d2, key)
         h1, h2 = _hash_tree(d1), _hash_tree(d2)
-    return {
-        name: (h1.get(name, ""), h2.get(name, "")) for name in sorted(set(h1) | set(h2)) if h1.get(name) != h2.get(name)
-    }
+    return {n: (h1.get(n, ""), h2.get(n, "")) for n in sorted(set(h1) | set(h2)) if h1.get(n) != h2.get(n)}
 
 
-# ───────────────────────────── основной класс FS
+# ──────────────────────────── основной класс FS
 class ZilantFS(Operations):  # type: ignore[misc]
-    """In-memory (FUSE-совместимая) FS для автотестов."""
+    """Минимальная, но полноценная FS; достаточно для всех автотестов."""
 
     def __init__(
-        self,
-        container: Path,
-        password: bytes,
-        *,
-        decoy_profile: str | None = None,
-        force: bool = False,
+        self, container: Path, password: bytes, *, decoy_profile: str | None = None, force: bool = False
     ) -> None:
         self.container = container
         self.password = password
@@ -325,26 +314,27 @@ class ZilantFS(Operations):  # type: ignore[misc]
         if not force and meta.get("latest_snapshot_id") and meta.get("label") != meta["latest_snapshot_id"]:
             raise RuntimeError("rollback detected: mount with --force")
 
+        if decoy_profile is not None and decoy_profile not in _DECOY_PROFILES:
+            raise ValueError(f"Unknown decoy profile: {decoy_profile}")
+
         if decoy_profile:
-            data = _DECOY_PROFILES.get(decoy_profile)
-            if data is None:
-                raise ValueError(f"Unknown decoy profile: {decoy_profile}")
             self.ro = True
-            for rel, content in data.items():
+            for rel, content in _DECOY_PROFILES[decoy_profile].items():
                 p = self.root / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content, encoding="utf-8")
         elif container.exists():
             try:
                 unpack_dir(container, self.root, password)
-            except Exception as exc:  # pragma: no cover
-                logger.warning("integrity_error:%s", exc)
+            except Exception:
+                logger.warning("integrity error — mounted read‑only")
                 self.ro = True
         else:
             self.root.mkdir(parents=True, exist_ok=True)
 
         ACTIVE_FS.append(self)
 
+    # ───── helpers
     def _full(self, path: str) -> str:
         return str(self.root / path.lstrip("/"))
 
@@ -352,45 +342,36 @@ class ZilantFS(Operations):  # type: ignore[misc]
         if self.ro:
             raise FuseOSError(errno.EACCES)
 
+    # ───── bench helper
     def throughput_mb_s(self) -> float:
         dur = max(time.time() - self._start, 1e-3)
         mb = self._bytes_rw / (1024 * 1024)
         self._bytes_rw, self._start = 0, time.time()
         return mb / dur
 
-    def destroy(self, _p: str) -> None:  # noqa: D401
-        """Сериализовать tmp-каталог обратно в контейнер. Второй вызов — noop."""
+    def destroy(self, _p: str | None = "/") -> None:
+        """Сериализовать tmp‑каталог обратно в контейнер (idempotent)."""
         if not self.ro:
             try:
                 if os.getenv("ZILANT_STREAM") == "1":
                     pack_dir_stream(self.root, self.container, self.password)
                 else:
                     pack_dir(self.root, self.container, self.password)
-            except FileNotFoundError:  # pragma: no cover
+            except FileNotFoundError:
                 pass
-        # Всегда очищаем tmp, даже при повторном destroy
         try:
             self._tmp.cleanup()
         except Exception:
             pass
-        # Убираем из ACTIVE_FS один раз, повторные remove игнорируем
         try:
             ACTIVE_FS.remove(self)
         except ValueError:
             pass
 
+    # ───── базовые операции
     def getattr(self, path: str, _fh: int | None = None) -> Dict[str, Any]:
         st = os.lstat(self._full(path))
-        keys = (
-            "st_mode",
-            "st_size",
-            "st_atime",
-            "st_mtime",
-            "st_ctime",
-            "st_uid",
-            "st_gid",
-            "st_nlink",
-        )
+        keys = ("st_mode", "st_size", "st_atime", "st_mtime", "st_ctime", "st_uid", "st_gid", "st_nlink")
         return {k: getattr(st, k) for k in keys}
 
     def readdir(self, path: str, _fh: int) -> List[str]:
@@ -420,31 +401,31 @@ class ZilantFS(Operations):  # type: ignore[misc]
         self._rw_check()
         _truncate_file(Path(self._full(path)), length)
 
-    # дополнительные операции (не требуются CI, но для полноты)
-    def unlink(self, path: str) -> None:  # pragma: no cover
+    # ───── дополнительные (они нужны ряду тестов)
+    def flush(self, _p: str, fh: int) -> None:
+        os.fsync(fh)
+
+    def release(self, _p: str, fh: int) -> None:
+        os.close(fh)
+
+    def unlink(self, path: str) -> None:
         self._rw_check()
         os.unlink(self._full(path))
 
-    def mkdir(self, path: str, mode: int) -> None:  # pragma: no cover
+    def mkdir(self, path: str, mode: int) -> None:
         self._rw_check()
         os.mkdir(self._full(path), mode)
 
-    def rmdir(self, path: str) -> None:  # pragma: no cover
+    def rmdir(self, path: str) -> None:
         self._rw_check()
         os.rmdir(self._full(path))
 
-    def rename(self, old: str, new: str) -> None:  # pragma: no cover
+    def rename(self, old: str, new: str) -> None:
         self._rw_check()
         os.rename(self._full(old), self._full(new))
 
-    def flush(self, _p: str, fh: int) -> None:  # pragma: no cover
-        os.fsync(fh)
 
-    def release(self, _p: str, fh: int) -> None:  # pragma: no cover
-        os.close(fh)
-
-
-# ───────────────────────────── stub-mount API
+# ──────────────────────────── stub‑mount API (используется мобильным клиентом)
 def mount_fs(*_a: Any, **_kw: Any) -> None:  # pragma: no cover
     raise RuntimeError("mount_fs not available in test build")
 

@@ -261,4 +261,3 @@ Source and tests are maintained by @QuantumKeyUYU, while documentation also list
 - Docker image with `ENTRYPOINT=python -c "import zilant_prime_core; zilant_prime_core.harden_linux()"`
 
 ^_^
-
