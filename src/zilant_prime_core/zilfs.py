@@ -84,7 +84,7 @@ def _mark_sparse(path: Path) -> None:
         return
     try:  # pragma: no cover
         import ctypes
-        from ctypes import wintypes as wt
+        import ctypes.wintypes as wt
 
         FSCTL_SET_SPARSE = 0x900C4
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
@@ -149,7 +149,7 @@ try:
             progress: int | None = None,
         ) -> int:  # pragma: no cover
             try:
-                return _ORIG_COPYFILE2(src, dst, flags, progress)  # type: ignore[arg-type]
+                return _ORIG_COPYFILE2(src, dst, flags, progress)  # type: ignore[no-any-return]
             except OSError as exc:
                 if getattr(exc, "winerror", None) != 112:
                     raise
