@@ -1,7 +1,8 @@
-import _winapi
 import importlib
 import shutil
 from pathlib import Path
+
+import _winapi
 
 zl = importlib.import_module("zilant_prime_core.zilfs")
 ZilantFS = zl.ZilantFS

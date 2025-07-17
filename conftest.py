@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2025 Zilant Prime Core contributors
 # SPDX-License-Identifier: MIT
 
-import os
-import sys
-import platform
 import importlib.util
+import os
+import platform
+import sys
 from pathlib import Path
 
 # вставляем папку src/ в начало sys.path, чтобы
@@ -18,12 +18,15 @@ os.environ.setdefault("ZILANT_ALLOW_ROOT", "1")
 
 import pytest
 
+
 @pytest.fixture(autouse=True)
 def _disable_screen_guard(monkeypatch):
     """Skip screen guard checks during tests."""
     from zilant_prime_core.utils import screen_guard
+
     monkeypatch.setattr(screen_guard.guard, "assert_secure", lambda: None)
     yield
+
 
 def pytest_runtest_setup(item):
     # пропускаем все тесты, в имени которых есть "pyside", если нет PySide6
