@@ -1,0 +1,15 @@
+name: Security vulnerability report
+description: Report a security issue privately
+labels: [security]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide details of the vulnerability. Our team will respond within **48 hours**.
+  - type: textarea
+    id: details
+    attributes:
+      label: Issue details
+      description: Steps to reproduce and potential impact
+    validations:
+      required: true

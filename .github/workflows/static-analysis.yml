@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025 Zilant Prime Core contributors
+
+name: Static Analysis
+
+on:
+  pull_request:
+    paths:
+      - 'src/**/*.py'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: |
+            p/python
+            ./.semgrep.yml
+            ./.semgrep/custom
+          generateSarif: true
+          publishSarif: true
+          comment: true
+          autofix: true

@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2025 Zilant Prime Core contributors
+# SPDX-License-Identifier: MIT
+name: Trivy Critical Vulnerability Scan
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  sbom-trivy-grype:
+    name: SBOM & Trivy/Grype Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up job
+        uses: actions/checkout@v4
+
+      # Генерируем SBOM и загружаем его как артефакт
+      - name: Install Syft CLI
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin v0.98.0
+
+      - name: Generate SBOM in CycloneDX JSON
+        run: |
+          echo "📦 Генерируем SBOM, создаём sbom.json..."
+          set -e
+          syft packages . -o cyclonedx-json=sbom.json
+
+      - name: Upload SBOM artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-json
+          path: sbom.json
+
+      # Сканируем SBOM через Grype, падаем только при «CRITICAL»
+      - name: Install Grype for SBOM scan
+        run: |
+          echo "🔍 Устанавливаем Grype для сканирования SBOM..."
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run Grype scan against SBOM (fail on ≥ CRITICAL)
+        run: |
+          echo "🔍 Запускаем Grype (падать только на CRITICAL)..."
+          set -e
+          # Если найдутся «Critical» – выходной код 1, иначе 0
+          grype sbom:sbom.json --fail-on critical
+
+      # Сканируем весь репозиторий через Trivy, падаем только при «CRITICAL»
+      - name: Install Trivy
+        run: |
+          echo "🛡 Устанавливаем Trivy..."
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.45.0
+
+      - name: Run Trivy filesystem scan (CRITICAL only)
+        run: |
+          echo "🔍 Запускаем Trivy FS Scan (падать только на CRITICAL)..."
+          set -e
+          trivy fs \
+            --exit-code 1 \
+            --severity CRITICAL \
+            --format json \
+            --output trivy-report.json \
+            .
+
+      - name: Upload Trivy report (JSON)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.json

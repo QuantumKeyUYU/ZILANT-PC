@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025 Zilant Prime Core contributors
+
+name: Python Security Scan
+
+on:
+  pull_request:
+    paths:
+      - 'src/**/*.py'
+      - 'scripts/**/*.py'
+      - 'tools/python_security_checklist.py'
+      - '.github/workflows/python-security.yml'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run security checklist
+        run: python tools/python_security_checklist.py
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-security-report
+          path: python_security_report.md
