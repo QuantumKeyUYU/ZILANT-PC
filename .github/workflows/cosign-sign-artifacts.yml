@@ -1,0 +1,21 @@
+name: Sign & Publish Artifacts
+
+on:
+  workflow_run:
+    workflows: ["Quality"]
+    types: [completed]
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install syft cyclonedx-cli cosign
+      - run: syft . -o cyclonedx-json=sbom.json
+      - run: cosign sign --key ${{ secrets.COSIGN_KEY }} sbom.json
+      - run: cosign sign --key ${{ secrets.COSIGN_KEY }} dist/whitepaper.pdf
+      - run: cosign upload --rekor-url $REKOR_URL --key ${{ secrets.COSIGN_KEY }} dist/*.whl
+      - run: cosign verify --rekor-url $REKOR_URL dist/*.whl
+    env:
+      REKOR_URL: ${{ secrets.REKOR_URL }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}

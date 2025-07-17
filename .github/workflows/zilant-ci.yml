@@ -1,0 +1,171 @@
+name: zilant-ci
+
+on:
+  push:
+    branches: [ main, ci-check-ready ]
+  pull_request:
+    branches: [ main, ci-check-ready ]
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dev-deps
+        run: pip install -e .[dev]
+
+      - name: Pre-commit
+        run: pre-commit run --all-files
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Black (format)
+        run: black --check .
+
+      - name: isort (imports)
+        run: isort --check-only .
+
+      - name: Bandit (SAST)
+        run: bandit -r src -ll
+
+      - name: Semgrep (SAST)
+        run: semgrep ci
+
+      - name: Mypy (types)
+        run: mypy --config-file mypy.ini src
+
+      - name: Pytest
+        run: ZILANT_ALLOW_ROOT=1 pytest -q
+
+  perf:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .[dev]
+      - run: SKIP_FUZZ=1 ZILANT_ALLOW_ROOT=1 pytest -q -m perf --disable-warnings --maxfail=1
+
+  large-file-test:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .[dev]
+      - run: pytest -q tests/test_stream_large.py tests/test_stream_resume.py
+
+  cli-polish:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .[dev]
+      - run: pytest -q tests/test_cli_observability.py
+
+  docs:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install docs-deps
+        run: pip install -e .[docs]
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+
+      - name: Install Mermaid-CLI
+        run: npm install -g @mermaid-js/mermaid-cli
+
+      - name: Install Chrome deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 \
+            libxext6 libxfixes3 libxi6 libxrandr2 libxtst6 \
+            libnss3 libatk1.0-0 libgtk-3-0 libpangocairo-1.0-0
+
+      - name: Create puppeteer-config.json
+        run: |
+          mkdir -p docs
+          cat > docs/puppeteer-config.json << 'EOF'
+          { "args": ["--no-sandbox", "--disable-setuid-sandbox"] }
+          EOF
+
+      - name: Generate Mermaid diagrams
+        run: |
+          npx mmdc \
+            -p docs/puppeteer-config.json \
+            -i docs/architecture/key_lifecycle.mmd \
+            -o docs/_static/key_lifecycle.svg
+
+      - name: Build HTML docs
+        working-directory: docs
+        run: make html
+
+  build-pq:
+    needs: [ quality, perf ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build deps
+        run: pip install -e .[dev] build pyyaml
+
+      - name: Build PQ wheels
+        run: python tools/build_pq_wheels.py
+
+      - name: Install Pandoc & XeLaTeX
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pandoc texlive-xetex
+
+      - name: Prepare THREATS placeholder
+        run: cp docs/THREATS.rst docs/THREATS.md
+
+      - name: Generate Whitepaper
+        run: python tools/gen_whitepaper.py
+
+      - name: Upload PQ wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: pq-wheels
+          path: dist/*.whl
+          if-no-files-found: ignore
+
+  # sign (закомментировано)
+  # sign:
+  #   needs: build-pq
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     …

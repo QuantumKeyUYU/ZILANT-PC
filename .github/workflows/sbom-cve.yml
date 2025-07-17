@@ -1,0 +1,68 @@
+# .github/workflows/sbom-cve.yml
+
+name: "SBOM & CVE Scan (Syft + Trivy, production, compatible)"
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  sbom-cve:
+    name: Generate SBOM & scan SBOM for vulnerabilities
+    runs-on: ubuntu-latest
+
+    steps:
+      # ────────────────────────────────────────────────────────────────
+      - name: 🔄 Checkout repository
+        uses: actions/checkout@v4
+
+      # ────────────────────────────────────────────────────────────────
+      - name: Install Syft CLI
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin v0.98.0
+
+      - name: Install Grype CLI
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin v0.70.0
+
+      - name: Preload Grype Vulnerability DB
+        run: |
+          grype db update || echo "\u26a0\ufe0f skip DB update"
+
+      - name: Reproducible SBOM & scan
+        run: bash scripts/reprod.sh
+
+      # ────────────────────────────────────────────────────────────────
+      - name: 📤 Upload SBOM (CycloneDX JSON)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx-json
+          path: sbom.json
+
+      # ────────────────────────────────────────────────────────────────
+      - name: 🛠 Install Trivy (v0.45.0 – совместимый)
+        run: |
+          # Ставим Trivy v0.45.0 (гарантированно умеет читать SBOM из Syft v0.82.0)
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.45.0
+
+      # ────────────────────────────────────────────────────────────────
+      - name: 🔍 Scan SBOM with Trivy (CVE + license)
+        run: |
+          # Сканируем sbom.json, сохраняем результат в trivy-sbom-report.json
+          trivy sbom sbom.json --format json --output trivy-sbom-report.json
+
+      # ────────────────────────────────────────────────────────────────
+      - name: 📤 Upload Trivy SBOM scan report (JSON)
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sbom-report
+          path: trivy-sbom-report.json

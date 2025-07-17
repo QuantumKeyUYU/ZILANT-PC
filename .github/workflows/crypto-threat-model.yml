@@ -1,0 +1,29 @@
+name: Crypto Threat Model
+
+on:
+  pull_request:
+  release:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install atheris pyyaml
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Run crypto model
+        run: python tools/crypto_threat_model.py
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-threat-report
+          path: |
+            crypto_threat_report.md
+            docs/assets/threat_model.mmd

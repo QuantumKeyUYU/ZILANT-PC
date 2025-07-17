@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025 Zilant Prime Core contributors
+
+name: Import Graph
+
+on:
+  pull_request:
+    paths:
+      - 'src/**/*.py'
+      - 'tools/import_graph.py'
+      - '.github/workflows/import-graph.yml'
+
+jobs:
+  graph:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Generate import graph
+        run: python tools/import_graph.py --svg
+
+      - name: Upload import graph
+        uses: actions/upload-artifact@v4
+        with:
+          name: import-graph
+          path: |
+            import_graph.dot
+            import_graph.svg

@@ -1,0 +1,11 @@
+name: Bug Bounty
+description: Report a security vulnerability for bounty consideration
+labels: [security]
+body:
+  - type: textarea
+    id: details
+    attributes:
+      label: Vulnerability details
+      description: Describe the issue in detail
+    validations:
+      required: true

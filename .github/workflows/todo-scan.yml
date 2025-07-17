@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2025 Zilant Prime Core contributors
+
+name: TODO Scan
+
+on:
+  pull_request:
+    paths:
+      - '**/*.py'
+      - 'tools/todo_report.py'
+      - '.github/workflows/todo-scan.yml'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Collect TODO comments
+        run: python tools/todo_report.py
+
+      - name: Upload TODO report
+        uses: actions/upload-artifact@v4
+        with:
+          name: todo-report
+          path: todo_report.md
